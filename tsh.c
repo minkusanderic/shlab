@@ -190,7 +190,6 @@ void eval(char *cmdline) {
     if (!builtin_cmd(argv)) {
         //fork. if child, then execute
         if ((pid = fork()) == 0) {
-
           setpgid(0, 0);
             if (execve(argv[0], argv, environ) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
@@ -201,8 +200,10 @@ void eval(char *cmdline) {
         else if (pid != 0)
           waitfg(pid);
         //if background job, set status to BG and add job
-        if(bg) 
+        if(bg) {
             addjob(jobs, pid, BG, cmdline);
+            printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
+          }
         //otherwise set status to FG and add job
         else {
             waitfg(pid);
@@ -211,11 +212,6 @@ void eval(char *cmdline) {
 
         //time to unblock our signals in signal set
         sigprocmask(SIG_UNBLOCK, &set, NULL); 
-    
-        if (!bg){}
-        //print foreground job to command line
-        else
-          printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
     }
     return;
 }
@@ -322,24 +318,29 @@ void do_bgfg(char **argv) {
     return;
   }
   else{
-    if (argv[1][0] == '%') {       //JID used to ID job
+     //JID used to ID job
+    if (argv[1][0] == '%') {      
       id = atoi(&argv[1][1]);
       j = getjobjid(jobs, id);
     }
-    else{                                 //PID used to ID job
+    //PID used to ID job
+    else{                                 
       id = atoi(&argv[1][0]);
       j = getjobpid(jobs, id);
     }
 
+  //if we cant find job, notify user and return  
+  if (j == NULL){
+     printf("%s: No such job\n", argv[1]);
+     return;
+   }
+
+  //Do background command
   if (strcmp(argv[0], "bg")) {
   }
+  //Do background command
   else if (strcmp(argv[0], "fg")) {
   }
-    
-    if (j == NULL){
-      printf("%s: No such job\n", argv[1]);
-      return;
-    }
 
     
   }
