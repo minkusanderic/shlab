@@ -167,39 +167,56 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) {
     char *argv[MAXARGS];
-    int bg, st;                         //use to set bg and state of job
-    pid_t pid;                          
+    //use to store whether background job or not {1 or 0}
+    int bg;  
+    //hold pid
+    pid_t pid;
+    //send command line to parseline() to determine if background job or not                          
     bg = parseline(cmdline, argv);
-
+    //contains the list of signals
     sigset_t set;
+    //see if anything is on command line
+    if (argv[0] == NULL)
+        return;
 
+    //block signals until this job is added
     sigemptyset(&set);
     sigaddset(&set, SIGCHLD);
     sigaddset(&set, SIGINT);
     sigaddset(&set, SIGTSTP);
     sigprocmask(SIG_BLOCK, &set, NULL);
 
-    int cmd = 0;
-    if (argv[0] == NULL)
-        return;
-    if (!(cmd = builtin_cmd(argv))) {
-        pid = fork();
-        if (pid == 0) {
+    //if command line is not builtin command, it should be an executable. lets execute it
+    if (!builtin_cmd(argv)) {
+        //fork. if child, then execute
+        if ((pid = fork()) == 0) {
+
+          setpgid(0, 0);
             if (execve(argv[0], argv, environ) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
                 exit(0);
             }
         }
-        else if(pid != 0)
+        //if parent, wait for child
+        else if (pid != 0)
+          waitfg(pid);
+        //if background job, set status to BG and add job
+        if(bg) 
+            addjob(jobs, pid, BG, cmdline);
+        //otherwise set status to FG and add job
+        else {
             waitfg(pid);
+            addjob(jobs, pid, FG, cmdline);
+          }
+
+        //time to unblock our signals in signal set
+        sigprocmask(SIG_UNBLOCK, &set, NULL); 
+    
+        if (!bg){}
+        //print foreground job to command line
         else
-            printf("%d %s", pid, cmdline);
+          printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
     }
-    else{
-
-    }
-    /*REAP CHILDREN SOMEWHERE IN THIS FUNCTION*/
-
     return;
 }
 
@@ -265,28 +282,29 @@ int parseline(const char *cmdline, char **argv)
  *    it immediately.  
  */
 int builtin_cmd(char **argv) {
-    printf("argv = %s\n", *argv);
-    if (!strcmp(argv[0],"quit")) {              //builtin "quit" command
+    //builtin "quit" command, we can exit
+    if (!strcmp(argv[0],"quit")) {              
         exit(0);
         return 1;
     }
-    if (!strcmp(argv[0],"kill")) {              //builtin "kill" command
-        printf("kill found\n");
-        return 1;
-    }
-    else if (!strcmp(argv[0],"fg")) {           //builtin "fg" command
-        printf(" found\n");
+    //builtin "kill" command
+    else if (!strcmp(argv[0],"kill")) {              
         
         return 1;
     }
-    else if (!strcmp(argv[0],"bg")) {           //builtin "bg" command
-        printf(" found\n");
+    //builtin "fg" command, lets go do_bgfg
+    else if (!strcmp(argv[0],"fg")) {           
         do_bgfg(argv);
         return 1;
     }
-    else if (!strcmp(argv[0],"jobs")) {         //builtin "jobs" command
-        printf(" found\n");
-        
+    //builtin "bg" command, lets go do_bgfg
+    else if (!strcmp(argv[0],"bg")) {           
+        do_bgfg(argv);
+        return 1;
+    }
+    //builtin "jobs" command, lets print a list of jobs
+    else if (!strcmp(argv[0],"jobs")) {         
+        listjobs(jobs);        
         return 1;
     }
     return 0;     /* not a builtin command */
@@ -312,14 +330,20 @@ void do_bgfg(char **argv) {
       id = atoi(&argv[1][0]);
       j = getjobpid(jobs, id);
     }
+
+  if (strcmp(argv[0], "bg")) {
+  }
+  else if (strcmp(argv[0], "fg")) {
+  }
     
     if (j == NULL){
       printf("%s: No such job\n", argv[1]);
       return;
     }
 
-    //BLOCK SIGNALS HERE AND SET BG AND FG ACCORDINGLY
+    
   }
+  //after we "do" bg or fg process
   return;
 }
 
@@ -328,8 +352,9 @@ void do_bgfg(char **argv) {
  */
 void waitfg(pid_t pid) {
   struct job_t *j = getjobpid(jobs, pid);
-  while((j = getjobpid(jobs, pid)) != NULL && j->state == FG)
+  while(j != NULL && j->state == FG)
     sleep(1);
+  return;
 }
 
 /*****************
@@ -370,7 +395,11 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
-    return;
+  struct job_t * j;
+  j= getjobpid(jobs, fgpid(jobs));
+  j->state = ST;
+  kill(-(j->pid), SIGTSTP);
+  return;
 }
 
 /*********************
@@ -505,7 +534,6 @@ int pid2jid(pid_t pid)
 void listjobs(struct job_t *jobs) 
 {
     int i;
-    
     for (i = 0; i < MAXJOBS; i++) {
 	if (jobs[i].pid != 0) {
 	    printf("[%d] (%d) ", jobs[i].jid, jobs[i].pid);
