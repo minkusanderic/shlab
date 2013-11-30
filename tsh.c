@@ -202,16 +202,19 @@ void eval(char *cmdline) {
         //if background job, set status to BG and add job
         if(bg) {
             addjob(jobs, pid, BG, cmdline);
+            //time to unblock our signals in signal set
+            sigprocmask(SIG_UNBLOCK, &set, NULL); 
+            //show user the background job info
             printf("[%d] (%d) %s", pid2jid(pid), pid, cmdline);
           }
         //otherwise set status to FG and add job
         else {
-            waitfg(pid);
             addjob(jobs, pid, FG, cmdline);
+            //time to unblock our signals in signal set
+            sigprocmask(SIG_UNBLOCK, &set, NULL); 
+            //let this foreground job finish before moving on
+            waitfg(pid);
           }
-
-        //time to unblock our signals in signal set
-        sigprocmask(SIG_UNBLOCK, &set, NULL); 
     }
     return;
 }
@@ -278,10 +281,13 @@ int parseline(const char *cmdline, char **argv)
  *    it immediately.  
  */
 int builtin_cmd(char **argv) {
-    //builtin "quit" command, we can exit
-    if (!strcmp(argv[0],"quit")) {              
-        exit(0);
+    //ignore ampersand, we'll handle background job elsewhere
+    if (!strcmp(argv[0], "&"))
         return 1;
+    //builtin "quit" command, we can exit
+    if (!strcmp(argv[0],"quit")) {   
+    //quit = exit shell           
+        exit(0);
     }
     //builtin "kill" command
     else if (!strcmp(argv[0],"kill")) {              
@@ -310,40 +316,61 @@ int builtin_cmd(char **argv) {
  * do_bgfg - Execute the builtin bg and fg commands
  */
 void do_bgfg(char **argv) {
-  int id;
-  char * id_str;
-  struct job_t * j = NULL;
-  if(argv[1] == NULL){
-    printf("%s command requires %%jobid or PID \n", argv[0]);
-    return;
-  }
-  else{
-     //JID used to ID job
-    if (argv[1][0] == '%') {      
-      id = atoi(&argv[1][1]);
-      j = getjobjid(jobs, id);
+    //hold jid or pid in id
+    int id;
+    //placeholder for job
+    struct job_t * j = NULL;
+
+    //nothing to identify the job? notify user
+    if(argv[1] == NULL){
+        printf("%s command requires %%jobid or PID \n", argv[0]);
+        return;
     }
-    //PID used to ID job
-    else{                                 
-      id = atoi(&argv[1][0]);
-      j = getjobpid(jobs, id);
+    //otherwise, find either jid or pid
+    else{
+        //JID used to ID job
+        if (argv[1][0] == '%') { 
+            //set id to jid and set j to job with jid 
+            id = atoi(&argv[1][1]);
+            j = getjobjid(jobs, id);
+        }
+        //PID used to ID job
+        else{ 
+            //set id to pid and set j to job with pid                          
+            id = atoi(&argv[1][0]);
+            j = getjobpid(jobs, id);
+        }
+
+        //if we cant find job, notify user and return  
+        if (j == NULL || j->jid < 1){
+            printf("%s: No such job\n", argv[1]);
+            return;
+        }
+
+        //if we find the job, change its state to BG
+        if (!strcmp(argv[0], "bg")) {
+            if (j->state == ST || j->state == FG) {
+                //call kill func with SIGCONT signal
+                kill(-(j->pid), SIGCONT);
+                //send job to background state
+                j->state = BG;
+                //notify user of background job info
+                printf("[%d] (%d) %s", pid2jid(j->pid), j->pid, j->cmdline);
+            }
+        }
+        //if we find job, change its state to FG
+        else if (!strcmp(argv[0], "fg")) {
+            if (j->state == ST || j->state == BG) {
+                //call kill func with SIGCONT signal
+                kill(-(j->pid), SIGCONT);
+                //send job to foreground state
+                j->state = FG;
+                //wait here until new foreground job is finished
+                waitfg(j->pid);
+            }
+        }
     }
 
-  //if we cant find job, notify user and return  
-  if (j == NULL){
-     printf("%s: No such job\n", argv[1]);
-     return;
-   }
-
-  //Do background command
-  if (strcmp(argv[0], "bg")) {
-  }
-  //Do background command
-  else if (strcmp(argv[0], "fg")) {
-  }
-
-    
-  }
   //after we "do" bg or fg process
   return;
 }
@@ -352,10 +379,12 @@ void do_bgfg(char **argv) {
  * waitfg - Block until process pid is no longer the foreground process
  */
 void waitfg(pid_t pid) {
-  struct job_t *j = getjobpid(jobs, pid);
-  while(j != NULL && j->state == FG)
-    sleep(1);
-  return;
+    //find current foreground job
+    struct job_t *j = getjobpid(jobs, pid);
+    //sleep until its not foreground job anymore
+    while(j != NULL && j->state == FG)
+        sleep(1);
+    return;
 }
 
 /*****************
@@ -370,6 +399,20 @@ void waitfg(pid_t pid) {
  *     currently running children to terminate.  
  */
 void sigchld_handler(int sig) {
+    //hold status of child pid
+    int state;
+    //hold zombie shild pid
+    pid_t pid;
+
+    //find all zombie children and send signals accordingly
+    while((pid = waitpid(-1, &state, WNOHANG | WUNTRACED)) > 0){
+        if (WIFEXITED(state))
+            deletejob(jobs, pid);
+        else if (WIFSTOPPED(state))
+            sigtstp_handler(20);
+        else if (WIFSIGNALED(state))
+            sigint_handler(-2);
+    }
     return;
 }
 
@@ -378,14 +421,21 @@ void sigchld_handler(int sig) {
  *    user types ctrl-c at the keyboard.  Catch it and send it along
  *    to the foreground job.  
  */
-void sigint_handler(int sig) 
-{
-    printf("\nCaught SIGINT\n");
-    struct job_t * fg_job;
-    pid_t currfg_pid = fgpid(jobs);
-    fg_job = getjobpid(jobs, currfg_pid);
-    
-    exit(0);
+void sigint_handler(int sig) {
+    //holds the current foreground job
+    struct job_t * fg_job = getjobpid(jobs, fgpid(jobs));
+    //call kill func with SIGINT signal
+    kill(-(fg_job->pid), SIGINT);
+    //find if current foreground job is parent
+    if(fg_job->pid != 0){
+        //make sure signal is 2
+        if(sig == 2){
+            //notify user of termination
+            printf("Job [%d] (%d) terminated by signal %d\n", fg_job->jid, fg_job->pid, sig);
+            //delete that job
+            deletejob(jobs, fg_job->pid);
+        }
+    }
     return;
 }
 
@@ -394,13 +444,22 @@ void sigint_handler(int sig)
  *     the user types ctrl-z at the keyboard. Catch it and suspend the
  *     foreground job by sending it a SIGTSTP.  
  */
-void sigtstp_handler(int sig) 
-{
-  struct job_t * j;
-  j= getjobpid(jobs, fgpid(jobs));
-  j->state = ST;
-  kill(-(j->pid), SIGTSTP);
-  return;
+void sigtstp_handler(int sig) {
+    //hold foreground job in j
+    struct job_t * j = getjobpid(jobs, fgpid(jobs));
+    //call kill func with SIGTSTP signal
+    kill(-(j->pid), SIGTSTP);
+    //change j's state to stopped
+    j->state = ST;
+    //if j is parent
+    if(j->pid != 0){
+        //make sure signal received is 20
+        if(sig == 20){
+            //notify user of stopped job
+            printf("Job [%d] (%d) stopped by signal %d\n", j->jid, j->pid, sig);
+        }
+    }
+    return;
 }
 
 /*********************
