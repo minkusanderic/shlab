@@ -183,7 +183,7 @@ void eval(char *cmdline) {
     sigemptyset(&set);
     sigaddset(&set, SIGCHLD);
     sigaddset(&set, SIGINT);
-    sigaddset(&set, SIGTSTP);
+    //sigaddset(&set, SIGTSTP);
     sigprocmask(SIG_BLOCK, &set, NULL);
 
     //if command line is not builtin command, it should be an executable. lets execute it
@@ -191,6 +191,7 @@ void eval(char *cmdline) {
         //fork. if child, then execute
         if ((pid = fork()) == 0) {
           setpgid(0, 0);
+          sigprocmask(SIG_UNBLOCK, &set, NULL);
             if (execve(argv[0], argv, environ) < 0) {
                 printf("%s: Command not found.\n", argv[0]);
                 exit(0);
@@ -281,26 +282,21 @@ int parseline(const char *cmdline, char **argv)
  *    it immediately.  
  */
 int builtin_cmd(char **argv) {
-    //ignore ampersand, we'll handle background job elsewhere
+    //we'll handle background job elsewhere
     if (!strcmp(argv[0], "&"))
         return 1;
     //builtin "quit" command, we can exit
     if (!strcmp(argv[0],"quit")) {   
-    //quit = exit shell           
+        //quit = exit shell           
         exit(0);
     }
     //builtin "kill" command
-    else if (!strcmp(argv[0],"kill")) {              
+    //else if (!strcmp(argv[0],"kill")) {              
         
-        return 1;
-    }
-    //builtin "fg" command, lets go do_bgfg
-    else if (!strcmp(argv[0],"fg")) {           
-        do_bgfg(argv);
-        return 1;
-    }
-    //builtin "bg" command, lets go do_bgfg
-    else if (!strcmp(argv[0],"bg")) {           
+    //    return 1;
+    //}
+    //builtin "fg" or "bg" command, lets go do_bgfg
+    else if (!strcmp(argv[0],"fg") || !strcmp(argv[0],"bg")) { 
         do_bgfg(argv);
         return 1;
     }
@@ -308,7 +304,7 @@ int builtin_cmd(char **argv) {
     else if (!strcmp(argv[0],"jobs")) {         
         listjobs(jobs);        
         return 1;
-    }
+    } 
     return 0;     /* not a builtin command */
 }
 
@@ -320,10 +316,9 @@ void do_bgfg(char **argv) {
     int id;
     //placeholder for job
     struct job_t * j = NULL;
-
     //nothing to identify the job? notify user
     if(argv[1] == NULL){
-        printf("%s command requires %%jobid or PID \n", argv[0]);
+        printf("%s command requires PID or %%jobid argument\n", argv[0]);
         return;
     }
     //otherwise, find either jid or pid
@@ -333,20 +328,34 @@ void do_bgfg(char **argv) {
             //set id to jid and set j to job with jid 
             id = atoi(&argv[1][1]);
             j = getjobjid(jobs, id);
+            //make sure provided jid is an actual job
+            if (j == NULL)
+            {
+                printf("%s: No such job\n", argv[1]);
+                return;
+            }
         }
         //PID used to ID job
-        else{ 
+        else if (isdigit(argv[1][0])){  
             //set id to pid and set j to job with pid                          
             id = atoi(&argv[1][0]);
             j = getjobpid(jobs, id);
+            //make sure provided pid is an actual process
+            if (!pid2jid(id)) {
+                printf("(%d): No such process\n", id);
+                return;
+            }
         }
-
+        else
+            return;
         //if we cant find job, notify user and return  
-        if (j == NULL || j->jid < 1){
-            printf("%s: No such job\n", argv[1]);
+        
+        if(j == NULL){
+            printf("%s: argument must be a PID or %%jobid\n", argv[0]);
             return;
         }
-
+    }
+    
         //if we find the job, change its state to BG
         if (!strcmp(argv[0], "bg")) {
             if (j->state == ST || j->state == FG) {
@@ -360,16 +369,16 @@ void do_bgfg(char **argv) {
         }
         //if we find job, change its state to FG
         else if (!strcmp(argv[0], "fg")) {
-            if (j->state == ST || j->state == BG) {
+            //if (j->state == ST || j->state == BG) {
                 //call kill func with SIGCONT signal
-                kill(-(j->pid), SIGCONT);
+                if(kill(-(j->pid), SIGCONT) < 0)
+                    printf("error in fgbg sigcont\n");
                 //send job to foreground state
                 j->state = FG;
                 //wait here until new foreground job is finished
                 waitfg(j->pid);
-            }
+            //}
         }
-    }
 
   //after we "do" bg or fg process
   return;
@@ -382,7 +391,7 @@ void waitfg(pid_t pid) {
     //find current foreground job
     struct job_t *j = getjobpid(jobs, pid);
     //sleep until its not foreground job anymore
-    while(j != NULL && j->state == FG)
+    while(j != NULL && j->state == FG && j->pid == pid && j->jid > 0)
         sleep(1);
     return;
 }
@@ -403,13 +412,12 @@ void sigchld_handler(int sig) {
     int state;
     //hold zombie shild pid
     pid_t pid;
-
     //find all zombie children and send signals accordingly
     while((pid = waitpid(-1, &state, WNOHANG | WUNTRACED)) > 0){
         if (WIFEXITED(state))
             deletejob(jobs, pid);
         else if (WIFSTOPPED(state))
-            sigtstp_handler(20);
+            getjobpid(jobs, pid)->state = ST;
         else if (WIFSIGNALED(state))
             sigint_handler(-2);
     }
@@ -431,7 +439,7 @@ void sigint_handler(int sig) {
         //make sure signal is 2
         if(sig == 2){
             //notify user of termination
-            printf("Job [%d] (%d) terminated by signal %d\n", fg_job->jid, fg_job->pid, sig);
+            printf("Job [%d] (%d) terminated by signal 2\n", fg_job->jid, fg_job->pid);
             //delete that job
             deletejob(jobs, fg_job->pid);
         }
@@ -453,12 +461,12 @@ void sigtstp_handler(int sig) {
     j->state = ST;
     //if j is parent
     if(j->pid != 0){
-        //make sure signal received is 20
-        if(sig == 20){
+        //if(sig == 20){
             //notify user of stopped job
-            printf("Job [%d] (%d) stopped by signal %d\n", j->jid, j->pid, sig);
-        }
+            printf("Job [%d] (%d) stopped by signal 20\n", j->jid, j->pid);
+        //}
     }
+    else{}
     return;
 }
 
